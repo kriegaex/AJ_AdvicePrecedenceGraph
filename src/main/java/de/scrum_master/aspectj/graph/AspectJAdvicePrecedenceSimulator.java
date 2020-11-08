@@ -3,16 +3,18 @@ package de.scrum_master.aspectj.graph;
 import com.mxgraph.layout.mxCircleLayout;
 import com.mxgraph.swing.mxGraphComponent;
 import org.jgrapht.Graph;
-import org.jgrapht.alg.TransitiveReduction;
+import org.jgrapht.alg.CyclicTransitiveReduction;
 import org.jgrapht.alg.cycle.CycleDetector;
-import org.jgrapht.alg.cycle.DirectedSimpleCycles;
-import org.jgrapht.alg.cycle.TiernanSimpleCycles;
 import org.jgrapht.ext.JGraphXAdapter;
 import org.jgrapht.graph.DefaultDirectedGraph;
-import org.jgrapht.graph.DefaultListenableGraph;
+import org.jgrapht.nio.csv.CSVExporter;
+import org.jgrapht.nio.csv.CSVFormat;
 
 import javax.swing.*;
 import java.awt.*;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 
@@ -23,8 +25,10 @@ public class AspectJAdvicePrecedenceSimulator extends JFrame {
   private Graph<Advice, Advice.Edge> graph;
   private Advice.PrecedenceRule precedenceRule;
 
-  public static void main(String[] args) {
+  public static void main(String[] args) throws IOException {
+    boolean exportGraph = false;
     boolean visualiseGraph = true;
+    boolean exitOnFirstWindowClose = true;
     List<List<Advice>> demoAspects = Arrays.asList(
       Advice.createList(AFTER, AROUND, AROUND, BEFORE, BEFORE, AFTER),
       Advice.createList(AROUND, AFTER, AROUND, BEFORE, BEFORE, AFTER),
@@ -33,13 +37,20 @@ public class AspectJAdvicePrecedenceSimulator extends JFrame {
 
     for (Advice.PrecedenceRule precedenceRule : Advice.PrecedenceRule.values()) {
       for (List<Advice> advices : demoAspects) {
-        new AspectJAdvicePrecedenceSimulator(precedenceRule, advices, visualiseGraph);
+        new AspectJAdvicePrecedenceSimulator(precedenceRule, advices, exportGraph, visualiseGraph, exitOnFirstWindowClose);
         System.out.println(repeatString("-", 80));
       }
     }
   }
 
-  public AspectJAdvicePrecedenceSimulator(Advice.PrecedenceRule precedenceRule, List<Advice> adviceList, boolean visualiseGraph) throws HeadlessException {
+  public AspectJAdvicePrecedenceSimulator(
+    Advice.PrecedenceRule precedenceRule,
+    List<Advice> adviceList,
+    boolean exportGraph,
+    boolean visualiseGraph,
+    boolean exitOnFirstWindowClose
+  ) throws HeadlessException, IOException
+  {
     super(precedenceRule + " | " + adviceList);
     this.precedenceRule = precedenceRule;
     advices = adviceList;
@@ -47,14 +58,16 @@ public class AspectJAdvicePrecedenceSimulator extends JFrame {
 
     System.out.println("Advice precedence mode = " + precedenceRule);
     populateGraph();
-    if (!cyclesDetected()) {
-      System.out.println("No cycles detected -> performing transitive reduction");
-      doTransitiveReduction();
-      System.out.println();
+    if (exportGraph)
+      exportGraphToFile(precedenceRule.name() + "-" + Instant.now().toEpochMilli() + ".csv");
+    CyclicTransitiveReduction.INSTANCE.reduce(graph);
+    System.out.println("Transitively reduced graph = " + graph);
+    if (!new CycleDetector<>(graph).detectCycles())
       simulateAdviceExecution(getHighestPrecedenceAdvice(), 0);
-    }
+    else
+      System.out.println("Precedence graph contains cycles, cannot simulate advice execution");
     if (visualiseGraph)
-      drawGraph();
+      drawGraph(exitOnFirstWindowClose);
   }
 
   private void populateGraph() {
@@ -70,23 +83,10 @@ public class AspectJAdvicePrecedenceSimulator extends JFrame {
     System.out.println("Original graph = " + graph);
   }
 
-  private boolean cyclesDetected() {
-    CycleDetector<Advice, Advice.Edge> cycleDetector = new CycleDetector<>(graph);
-    if (!cycleDetector.detectCycles())
-      return false;
-    // TODO: After https://github.com/jgrapht/jgrapht/issues/667 is fixed, also perform transitive reduction for cyclic graphs
-    System.out.println("Cycles detected -> cannot perform transitive reduction due to JGraphT bug");
-    System.out.println("Vertices causing cycles = " + cycleDetector.findCycles());
-    DirectedSimpleCycles<Advice, Advice.Edge> simpleCycles = new TiernanSimpleCycles<>(graph);
-    System.out.println("List of simple cycles = " + simpleCycles.findSimpleCycles());
-    return true;
-  }
-
-  private void doTransitiveReduction() {
-    // Transitive reduction does not work with a ListenableGraph, throws NPE
-    TransitiveReduction.INSTANCE.reduce(graph);
-    assert advices.size() == graph.vertexSet().size();
-    System.out.println("Reduced, cycle-free graph = " + graph);
+  private void exportGraphToFile(String fileName) throws IOException {
+    System.out.println("Exporting graph to file " + fileName);
+    CSVExporter<Advice, Advice.Edge> csvExporter = new CSVExporter<>(Advice::toString, CSVFormat.ADJACENCY_LIST, ',');
+    csvExporter.exportGraph(graph, new FileWriter(fileName));
   }
 
   private Advice getHighestPrecedenceAdvice() {
@@ -97,6 +97,8 @@ public class AspectJAdvicePrecedenceSimulator extends JFrame {
   }
 
   private void simulateAdviceExecution(Advice advice, int depth) {
+    if (depth == 0)
+      System.out.println();
     final String indentation = repeatString("· ", depth);
     if (advice == null) {
       System.out.println(indentation + "JOINPOINT");
@@ -139,22 +141,11 @@ public class AspectJAdvicePrecedenceSimulator extends JFrame {
     return stringBuilder.toString();
   }
 
-  private void drawGraph() {
-    JGraphXAdapter<Advice, Advice.Edge> jgxAdapter = new JGraphXAdapter<>(new DefaultListenableGraph<>(graph));
-
-    mxGraphComponent component = new mxGraphComponent(jgxAdapter);
-    component.setConnectable(false);
-    component.getGraph().setAllowDanglingEdges(false);
-    getContentPane().add(component);
-
-    mxCircleLayout layout = new mxCircleLayout(jgxAdapter);
-    layout.setResetEdges(true);
-    int radius = 100;
-    layout.setRadius(radius);
-    layout.setMoveCircle(true);
-    layout.execute(jgxAdapter.getDefaultParent());
-
-    setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+  private void drawGraph(boolean exitOnFirstWindowClose) {
+    JGraphXAdapter<Advice, Advice.Edge> jGraphXAdapter = new JGraphXAdapter<>(graph);
+    getContentPane().add(new mxGraphComponent(jGraphXAdapter));
+    new mxCircleLayout(jGraphXAdapter).execute(jGraphXAdapter.getDefaultParent());
+    setDefaultCloseOperation(exitOnFirstWindowClose ? JFrame.EXIT_ON_CLOSE : JFrame.DISPOSE_ON_CLOSE);
     pack();
     setVisible(true);
   }
